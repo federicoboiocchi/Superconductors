@@ -18,3 +18,6 @@ This analysis is based on the Superconductivity dataset (from UCI machine learni
 For this reason, this report will have both applied parts, in which the interpretation phase will be prominent, and more theoretical ones focused on mathematical details and performance comparison.  
 
 I want to mention from the beginning that these data are the output of a cleaning procedure conducted on a larger dataset created by the *Japan's National Institute for Materials Science*. For this reason, they do not contain any missing value and they will turn out to be low-noise, highly-informative and well-separated data. As a consequence we won't see a huge improvement in performances of Bagging and AdaBoost with respect to standard methods.
+
+Github: https://github.com/federicoboiocchi
+Linkedin: https://www.linkedin.com/in/federico-boiocchi-152326249
