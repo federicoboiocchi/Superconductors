@@ -1,0 +1,1244 @@
+---
+title: "Superconductors Classification"
+subtitle: "A Data-mining approach using: Adaptive Boosting, Bagging, and k-NN"
+author: "Federico Boiocchi"
+output:
+  html_document:
+    toc: true         
+    toc_depth: 6
+    toc_float: TRUE
+    number_section: TRUE  
+---
+
+# Introduction
+
+Superconductors are materials that, when cooled below a certain temperature
+(called the *critical temperature*), lose all electrical resistance, meaning electric current can flow through them without any energy loss. This important behavior distinguishes them from standard conductors whose resistance decreases gradually as their temperature is lowered. The superconductivity property turns out to be highly useful in various fields of science from health-care, to energy production and delivery, not to mention its critical role in the high-tech electrical industry. 
+
+## Research Interest 
+
+This analysis is based on the Superconductivity dataset (from UCI machine learning depository:<https://archive.ics.uci.edu/dataset/464/superconductivty+data>) and has been conducted with the dual purpose of both introducing two robust classification models, namely **Adaptive Boosting** and **Bagging Trees** and seeing them applied to a real-world problem. For this reason, this report will have both applied parts, in which the interpretation phase will be prominent, and more theoretical ones focused on mathematical details and performance comparison.  
+
+I want to mention from the beginning that these data are the output of a cleaning procedure conducted on a larger dataset created by the *Japan's National Institute for Materials Science*. For this reason, they do not contain any missing value and they will turn out to be low-noise, highly-informative and well-separated data. As a consequence we won't see a huge improvement in performances of Bagging and AdaBoost with respect to standard methods. 
+
+## Libraries
+
+```{r,message=FALSE,warning=FALSE}
+rm(list = ls())
+
+set.seed(123)
+library(tidyverse) 
+library(caret)    # to compute confusion matrices 
+library(tree)     # to fit decision trees
+library(heatmaply)# to manage correlation matrix visualization
+library(rpart)    # to fit decision trees with additional parameters control 
+library(class)    # to perform k-NN
+library(cluster)  # to compute the silhouette matrix
+library(knitr)    # helps with data visualization
+```
+
+
+## Description of the datasets
+
+The Superconductivity data are composed by two datasets:
+
+**train.csv**
+
+- The main dataset on which classification will be carried out,  (**train.csv**) is a 21263 x 82 matrix, collecting 82 features for 21263 different superconductors. In this dataset each row represents a distinct superconductor with  its own chemical formula. Whereas, on the columns there are 81 explanatory variables and 1 continuous target,  namely, the *critical temperature* for each superconductor (in Kelvin). For the purpose of this analysis I will transform the target in a binary factor. More details will be provided later.  
+
+```{r,echo=FALSE}
+setwd("C:/Users/andre/Desktop/data mining/superconductivity")
+```
+
+```{r}
+data_tr <- read.csv("train.csv")
+```
+
+Below it is shown a sample of 20 variables of the dataset **train.csv**.
+Each variable is an aggregate of the underlying elemental properties.  
+
+```{r,echo=FALSE}
+str(data_tr[,sample(ncol(data_tr),size=20,replace=FALSE)])
+```
+
+It is worth mentioning how the 81 variables were derived: they represent statistical summaries of the properties of the internal chemical elements in each superconductor. In other words, each chemical compound (superconductor) is composed of certain elements, for which specific attributes—such as atomic radius, atomic mass, electrical conductivity, and others—are known. By applying various statistical aggregation functions to these properties (e.g., mean, range, standard deviation, geometric mean, etc.), the characteristics of the constituent elements have been aggregated for each superconductor. This approach naturally suggests a potential dimensionality reduction, as multiple redundant statistics have been computed for each elemental property.
+
+
+**unique_m.csv**
+
+- The second matrix (**unique_m.csv**) is a 21263 x 87 highly sparse dataset, containing for each observation (chemical formula of the Superconductor) the respective proportions of 87 chemical elements (that label the columns). This allows us to have a better understanding of which kind of elements are contained in each chemical compound. This second matrix could be interpreted as a Document Term matrix in which documents on the rows are chemical compounds and terms on the columns are chemical elements. More specifically, for each superconductor (SC), we have the proportion of the j-th chemical element present in the i-th SC. Proportions are measured in "parts" relative to the total, I will later explain how I handled these values.
+
+```{r}
+data <- read.csv("unique_m.csv")
+```
+
+Below It is shown a sample of 12 variables (including the target critical temperature) for 20 sampled superconductors (labeled material). 
+
+```{r}
+data %>%
+  select(material, critical_temp, sample(colnames(data), 11, replace = F)) %>%
+  sample_n(size = 20, replace = F) %>%
+  kable()
+```
+
+
+For the training of classification models I will work exclusively with the first  21263 x 82 dataset; only in the initial phase of data interpretation I will use the second DTM dataset to better understand the problem structure. 
+
+# Data Interpretation
+
+## Superconductors clustering
+
+In this phase I want to understand if I'm able to cluster Supercondutors based on their internal chemical elements; Besides that, I'm interested in assessing if the critical temperature across the estimated group is coherent with
+the materials involved. Indeed Superconductors (SC) could be split in two groups based on their critical temperature, namely, High-Temperature SC and Low-Temperature SC. Despite that, in this phase I'm trying to cluster them based on chemical element internal proportion (I'm not considering the target feature).
+
+Therefore I upload the "DTM" matrix (directly provided from UCI site) on which i will try to cluster superconductors, to better understand their composition and their nature. In the clustering phase, I remove the chemical formulas of each chemical compound, and the critical temperature. I also normalize the frequency of appearance of each chemical element in each Supercondutor. In this way I'm guaranteed to have all rows that sums to 1. It seemed to me more natural to normalize each row using the sum rather than defining the weights as $w_{ij}=tf_{ij}\ \cdot idf_i$. 
+
+```{r}
+pro <- data %>% select(-c(material, critical_temp))
+
+proe <- t(apply(pro, 1, function(x) x / sum(x)))
+```
+
+I want to perform **Hierarchical clustering**, (a distance-based clustering technique), with the aim of grouping together similar superconductors based on their internal proportion of 87 chemical elements. Specifically I compute the distance matrix (d) using standard euclidean distances and compute the clustering using **Ward's Method**. I then plot the resulting dendrogram 
+
+```{r}
+d <- dist(proe)
+groups <- hclust(d, method = "ward.D2")
+```
+
+Here I try to choose the number of clusters from 3 to 10 that minimizes the **Silhuoette metrics**. The best number of clusters turns out to be 4.
+
+```{r}
+i <- 0
+sil <- numeric(8)
+for (k in 3:10) {
+  i <- i + 1
+  lab <- cutree(groups, k = k)
+  s <- silhouette(lab, d)
+  summ <- summary(s)
+  sil[i] <- summ$avg.width
+}
+
+k_opt <- which.min(sil) + 2
+```
+
+Dendrogram with 4 highlithed clusters
+
+```{r}
+plot(groups, labels = FALSE)
+optclust <- cutree(groups, k = k_opt)
+rect.hclust(groups, k = 4, border = c("red", "green", "dodgerblue", "darkorange"))
+```
+
+In the following lines I want to show, for each cluster, the average frequency (over all SC) of  internal proportion of each chemical element. Average Frequencies have been ordered from the most frequent to the least; not all 87 elements have been plotted. The following code to plot the histogram for each group is very similar across the 4 classes hence I decided not to repeat it. It basically only changes the filter argument and the number of elements shown.   
+
+```{r}
+chem <- data.frame(proe, optclust)
+
+chem1 <- chem %>%
+  filter(optclust == 1) %>%
+  select(-optclust)
+
+means_1 <- apply(chem1, 2, mean)
+
+df1 <- data.frame(elements = colnames(proe), frequency_mean = means_1)
+df1_or <- df1 %>%
+  arrange(desc(frequency_mean)) %>%
+  slice_head(n = 25)
+```
+
+Knowing the average frequency of the most common chemical elements (namely Copper and Oxigen) in the first group, and using
+the Internet I've labeled this first category as the Copper-Oxide superconductors group. These are known to be High-Temperature superconductors. Among their applications there are Maglev trains and MRI machines. 
+
+```{r}
+ggplot(df1_or, aes(x = reorder(elements, -frequency_mean), y = frequency_mean, fill = elements)) +
+  geom_bar(stat = "identity", col = "grey50") +
+  theme_light() +
+  labs(x = "Element", y = "Mean Frequency", title = "Top 25 Elements by Mean Frequency") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = "none")
+
+```
+
+Using the same strategy as above,the second group is likely to be  composed by BSSCO superconductors ,namely, Bismuth-Strontium Based Cuprates. This are also known to be HTS but they are also likely to contain some LTS. They are used in the power transmission industry and will likely be experimented for future particle accelerators. 
+
+```{r,echo=FALSE}
+chem2 <- chem %>%
+  filter(optclust == 2) %>%
+  select(-optclust)
+
+means_2 <- apply(chem2, 2, mean)
+
+df2 <- data.frame(elements = colnames(proe), frequency_mean = means_2)
+df2_or <- df2 %>%
+  arrange(desc(frequency_mean)) %>%
+  slice_head(n = 25)
+
+ggplot(df2_or, aes(x = reorder(elements, -frequency_mean), y = frequency_mean, fill = elements)) +
+  geom_bar(stat = "identity", col = "grey50") +
+  theme_light() +
+  labs(x = "Element", y = "Mean Frequency", title = "Top 25 Elements by Mean Frequency") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = "none")
+
+```
+
+This third group is composed by many different chemical elements, with an important component of Iron, hence I've labeled them as Iron-Based Superconductors. They are know to be LTS but they are also likely to be HTS. For example they have gained attention due to their application in quantum computing.  
+
+```{r,echo=FALSE}
+chem3 <- chem %>%
+  filter(optclust == 3) %>%
+  select(-optclust)
+
+means_3 <- apply(chem3, 2, mean)
+
+df3 <- data.frame(elements = colnames(proe), frequency_mean = means_3)
+df3_or <- df3 %>%
+  arrange(desc(frequency_mean)) %>%
+  slice_head(n = 40)
+
+ggplot(df3_or, aes(x = reorder(elements, -frequency_mean), y = frequency_mean, fill = elements)) +
+  geom_bar(stat = "identity", col = "grey50") +
+  theme_light() +
+  labs(x = "Element", y = "Mean Frequency", title = "Top 40 Elements by Mean Frequency") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  guides(fill = "none")
+
+```
+
+The fourth and last group, due to its strong presence of Niobium, has been labeled as the class of Niobium-Based Superconductors. These SC are known to be LTS. They are the backbone of high-energy particle accelerators such as the Large Hadron Collider (LHC) at CERN.
+
+```{r,echo=FALSE}
+
+chem4 <- chem %>%
+  filter(optclust == 4) %>%
+  select(-optclust)
+
+means_4 <- apply(chem4, 2, mean)
+df4 <- data.frame(elements = colnames(proe), frequency_mean = means_4)
+df4_or <- df4 %>%
+  arrange(desc(frequency_mean)) %>%
+  slice_head(n = 20)
+
+ggplot(df4_or, aes(x = reorder(elements, -frequency_mean), y = frequency_mean, fill = elements)) +
+  geom_bar(stat = "identity", col = "grey50") +
+  theme_light() +
+  labs(x = "Element", y = "Mean Frequency", title = "Top 20 Elements by Mean Frequency") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1)) +
+  guides(fill = "none")
+```
+
+It is interesting to see if the distinction between HTS and  LTS, (that is not precisely clear up to this point since we haven't defined yet a threshold for the split) is respected across the four categories that have been created. To assess this, I have plotted the Boxplot of the variable critical temperature conditioned to the four estimated categories. I first relabel the four groups.
+
+```{r}
+optclust_char <- ifelse(optclust == 1, "Copper-Oxide SC",
+  ifelse(optclust == 2, "BSSCO SC",
+    ifelse(optclust == 3, "Iron-based SC", "Niobium-based SC")
+  )
+)
+dfbox <- data.frame(critical_temp = data$critical_temp, optclust_char)
+box_colors <- c(rep("salmon", 2), rep("lightblue", 2))
+```
+
+It is clear the distinction between HTS and LTS and how the four estimated categories are supported by the critical temp. variable. Indeed by checking the estimated types of superconductors, one can cross-check their belonging to the class by looking at their group critical temperature. 
+
+```{r}
+boxplot(critical_temp ~ optclust_char,
+  data = dfbox, ylab = "critical temperature",
+  cex.axis = 0.7, col = box_colors, xlab = "Superconductor Type"
+)
+text(x = 1.5, y = 150, labels = c("HTS"), col = "salmon")
+text(x = 3.6, y = 60, labels = c("LTS"), col = "lightblue")
+```
+
+It is interesting to investigate the nature of the far outliers 
+classified as Iron-based SC (LTS) that have high critical temperature
+
+```{r}
+outliers <- data %>%
+  filter(optclust == 3) %>%
+  filter(critical_temp > 70)
+outliers[,c(87,88)]
+```
+
+## Outliers
+
+The far outlier H2S1 (Hydrogen Sulfide) has been clustered 
+as an Iron based SC but it has a critical temperature of 185 Kelvin. 
+This suggest a problem of some sort related to this SC and in fact
+it turns out that it is not even a Superconductor, strictly speaking; Indeed
+only recent development has shown that at extreme pressure it can reach 
+superconductivity behavior. Besides this far outlier, it is interesting
+to notice many outliers falling all within the iron based category. Delving
+deeper I hypothesize this could be the consequence of Iron-based SC unconventional
+superconductivity. In other words, they show similar feature characteristics
+that has led them within the third group but at the same time they have an high
+variability in terms of critical temperatures (Likely due to superconductivity,
+triggered at unconventional thresholds under extreme pressure ).
+
+# Classification Models
+
+## Data Preparation
+```{r}
+data <- read.csv("train.csv")
+```
+
+I want to **transform** this problem from a **regression task** to a
+**binary classification** problem. Hence, the goal will be to accurately classify
+a superconductor either in the group of high-temperature superconductors (HTS) or
+in the group of low temperature superconductors (LTS).
+
+In this dataset, each superconductor could be labeled as HTS or LTS based on its critical temperature which will be the binary target variable for the classification problem. In the scientific literature there are two widely used thresholds
+to perform this split: 30 Kelvin and 77 Kelvin. I will arbitrarily use the first one.  This choice has been influenced also by the fact that it produces more balanced classes. This is the histogram of the continuous target variable
+
+```{r}
+hist(data$critical_temp, prob = T, breaks = 100, xlab = "critical temperature", main = "Histogram", ylab = "frequency density")
+```
+
+It could be seen an highly skewed  target variable that will likely
+yield unbalanced classes. I will tame this problem by adjusting the train set
+with oversampling. It is worth mentioning that HTS could be considered "more" interesting than LTS, due to their superconductivity behaviour at high temperatures. This is a property that allows to harness the superconductivity of the material
+without cooling it to very low temperatures (the cooling procedure requires more energy). This is the reason why I've arbitrarily chosen to set HTS as the class of interest. All variables are numeric, except for two. Since I considered transforming the variables *number_of_elements* and *range_Valence* into factors not meaningful, I converted them to numeric values to align them with the others.
+
+```{r,results='hide',warning=FALSE}
+data$number_of_elements <- as.numeric(data$number_of_elements)
+data$range_Valence <- as.numeric(data$range_Valence)
+```
+
+Here I've listed the above mentioned features of the chemical elements, that have been aggregated for each
+Superconductor. 
+
+Chemical element features:
+
+- **atomic mass**: total proton and neutron rest masses
+- **fie** : First Ionization Energy, energy required to remove a valence electron
+- **atomic radius**
+- **density**: density at standard temperature and pressure of the chemical element
+- **Electronic affinity**:  energy required to add an electron to a neutral atom
+- **Fusion heat**: energy to change from solid to liquid without temperature change
+- **Thermal conductivity**: measure of the ability to conduct heat
+- **Valence**:  typical number of chemical bonds formed by the element
+
+This quantities have been aggregated ,for each SC, using the following statistics:
+
+- mean
+- geometric mean
+- entropy
+- range
+- standard deviation
+- all their weighted versions. 
+
+### Feature selection 
+
+**via Principal Component Analysis (PCA)**
+
+I want to use **PCA** to do feature selection. **PCA** is an unsupervised technique
+that is performed on covariates and is completely independent by the target. The core idea in this phase is to summarize the information conveyed by the features
+and then understand which is the subset of covariates that best explain the overall
+variability of the dataset; And only successively use this subset of covariates to perform classification.
+The selection technique that i will use is based on **PCA** in the following way:
+
+I will select a number q of principal components (with q < 81), knowing that
+these q components explain a certain fraction of the total variance of the data.
+Then i will select for each of the q principal components scores the variable that influences the most each component. This is done based on PC loadings, namely the entries of eigenvectors associated with each principal component
+
+```{r}
+data_features <- data %>% select(-critical_temp)
+pca <- princomp(data_features, cor = T)
+
+p <- ncol(data_features)
+```
+
+I arbitrarily select the first 20 Principal components 
+
+```{r}
+q <- 20
+```
+
+The first line is the total variance explained while the second is the matrix of first q eigenvectors. Then i select the first q most influential variables on
+the first q principal components, by taking for each column the index associated with the highest squared weight.
+
+```{r,results='hide'}
+sum((pca$sdev[1:q])^2) / p
+variables <- names(data_features)[apply(pca$loadings[, 1:q], 2, function(x) which(x**2 == max(x**2)))]
+```
+
+Since the 18th principal component is primarily influenced by the same variable, *wtd_entropy_ThermalConductivity*, that most influences the 3rd principal component, I will replace the 18th component with the variable that has the second-highest influence on the 18th principal component (based on loadings).
+
+```{r}
+index <- which(colnames(data_features) == "wtd_entropy_ThermalConductivity")
+
+pc18 <- pca$loadings[-index, 18]
+v18 <- names(data_features)[which(pc18**2 == max(pc18**2))]
+
+variables[18] <- v18
+```
+
+If I change the number of components then I also need to check whether there
+are repetitions in the variables selected or not.
+
+```{r,warning=FALSE}
+data_select <- data %>% select(c(critical_temp, variables))
+```
+
+There's no clear multicollinearity since I've selected variables
+using impact on principal components scores, for this reason highly correlated
+variables have been removed, they don't bring additional information.
+Below I visualize through an Heatmap the correlation matrix among
+selected variables; as can be seen high-correlated variables are no longer
+included. 
+
+```{r}
+data_1 <- data %>% select(variables)
+Cor <- cor(data_1)
+heatmaply_cor(Cor,
+  cexRow = 0.6, cexCol = 0.6,
+  xlab = "variables",
+  ylab = "variables", show_dendrogram = c(F, F),
+  k_col = 4, k_row = 2, key.title = "correlation",
+  plot_method = "ggplot"
+)
+```
+
+### Train and Test Split
+
+I divide the data into training and test set, and also in features and response variable. I will sample 80% of the observations of the original dataset to
+compose the training set. The remaining 20% will be the test. 
+
+```{r}
+data_or <- data
+data <- data_select
+
+n <- nrow(data)
+prop <- 80 / 100
+ind_train <- sample(1:n, size = floor(prop * n), replace = FALSE)
+ind_test <- c(1:n)[-ind_train]
+```
+
+Training: covariates and target
+
+```{r}
+X_train <- data[ind_train, ] %>% select(-critical_temp)
+y_train <- data[ind_train, ] %>% select(critical_temp)
+```
+
+Test: covariates and target
+
+```{r}
+X_test <- data[ind_test, ] %>% select(-critical_temp)
+y_test <- data[ind_test, ] %>% select(critical_temp)
+```
+
+It is useful here to understand if a normalization is needed.
+With this purpose, i use a barplot to display the ranges of each variable
+in order to get a meaningful plot i ignore variables with a range over 
+5000. Only two of the selected variables turns out to have a range greater than
+5000, (*std_density* and its wtd version)
+
+```{r}
+ranges <- as.numeric(apply(X_train, 2, function(x) max(x) - min(x)))
+ind <- which(ranges < 5000)
+coln <- colnames(X_train[, ind])
+ranges <- ranges[ind]
+ranges <- data.frame(ranges, row.names = coln)
+
+
+ggplot(ranges, aes(x = coln, y = ranges)) +
+  geom_bar(stat = "identity", fill = "darkorange", col = "grey") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 7)) +
+  labs(x = "features", y = "Range", title = "Variable range Barplot")
+```
+
+### Training Normalization
+
+I should normalize the matrix *X_train* of training features
+and i will rename it *X_trn*. In this way each variable will have
+range $[0,1]$.
+
+```{r}
+n <- dim(X_train)[1]
+p <- dim(X_train)[2]
+
+X_trn <- matrix(data = NA, ncol = p, nrow = n)
+
+for (j in 1:p) {
+  x_trj <- X_train[, j]
+  X_trn[, j] <- (x_trj - min(x_trj)) / (max(x_trj) - min(x_trj))
+}
+
+
+X_trn <- as.data.frame(X_trn)
+colnames(X_trn) <- colnames(X_train)
+```
+
+I check the normalization result on selected variables of the training, and which variables have been selected through PCA. 
+
+```{r}
+str(X_trn)
+```
+
+I transform the target variable in a binary variable
+with 2 levels LTS: -1 , and HTS: 1 (HTS is the class of interest)
+
+```{r}
+y_train <- as.factor(ifelse(y_train < 30, -1, 1))
+train <- data.frame(X_trn, critical_temp = y_train)
+```
+
+### Oversampling 
+
+**problem of unbalanced classes**
+
+There's a problem related to unbalanced classes. I solved it 
+performing oversampling on the under-represented class. In this way I 
+have artificially created equal size classes.
+
+```{r}
+tab <- as.numeric(table(train$critical_temp))
+diff <- max(tab) - min(tab)
+
+train_HTS <- train %>%
+  group_by(critical_temp) %>%
+  filter(critical_temp == 1) %>%
+  sample_n(size = diff, replace = T)
+
+train_rs <- as.data.frame(rbind(train, train_HTS))
+train_rs <- train_rs[sample(nrow(train_rs)), ]
+
+colnames(train_rs) <- colnames(train)
+y_train_rs <- train_rs %>% select(critical_temp)
+table(train_rs$critical_temp)
+X_train_rs <- train_rs %>% select(-critical_temp)
+```
+
+## Classification Tree
+
+Here I've estimated a single full classification tree
+and then I've pruned it using a penalization parameter
+that has been automatically chosen by cross-validation based on Mislassification error. In the case of classification trees, deviance is not the sum of squares but a weighted sum of the logarithm of class proportions in each terminal region (similar to a total cross-entropy, but instead of the class proportion it shows the size of each class in the region).
+
+```{r}
+tree0 <- tree(critical_temp ~ ., data = train_rs, split = c("deviance"))
+
+cvtree0 <- cv.tree(tree0, FUN = prune.misclass)
+
+min_dev <- min(cvtree0$dev)
+optimal_sizes <- cvtree0$size[cvtree0$dev == min_dev]
+
+k_opt <- min(optimal_sizes)
+pruned_tree <- prune.misclass(tree0, best = k_opt)
+```
+
+Below there's the final pruned tree. As every standard classification tree,
+the interpretation phase is the most straightforward one: Given a specific
+supercondutor, and having its respective features, One has to start testing
+each node condition starting from the root up to the leaf nodes, and going on the 
+left if the conditions are satisfied. (the interpretation is less
+evident with normalized values, but it is still effective). It is worth mentioning that trees are highly data-dependent, hence a different training could have generated a different Tree. 
+
+```{r}
+plot(pruned_tree)
+text(pruned_tree, pretty = 0, cex = 0.5)
+```
+
+### Test Normalization 
+
+Here I normalize the test set using the columns of the training.
+the normalization phase is done separately from the training because 
+I don't want to pass any information from the test to the training
+in the phase of normalization.
+
+```{r}
+pt <- ncol(X_test)
+nt <- nrow(X_test)
+X_tst <- matrix(data = NA, ncol = pt, nrow = nt)
+
+for (j in 1:pt) {
+  x_tst <- X_train[, j]
+  X_tst[, j] <- (X_test[, j] - min(x_tst)) / (max(x_tst) - min(x_tst))
+}
+
+X_tst <- as.data.frame(X_tst)
+colnames(X_tst) <- colnames(X_test)
+
+y_test_fac <- as.factor(ifelse(y_test < 30, -1, 1))
+
+
+pred_class0 <- predict(pruned_tree, X_tst, type = "class")
+
+pre0 <- ifelse(pred_class0 == 1, 1, -1)
+pref <- as.factor(pre0)
+```
+
+Below i have the confusion matrix that evaluates
+the performance of the single pruned tree classifier on the test labels.
+
+```{r,message=FALSE}
+conf <- confusionMatrix(pref, y_test_fac, positive = "1")
+
+MER_single_pruned_tree <- 1 - as.numeric(conf$overall[1])
+conf
+```
+
+As we can see, since the structure of the data is simple and has few noise
+I have already a good accuracy and specificity, even with one single tree
+In the next section, I will introduce more robust methods;
+
+I've also tried to use another function rpart
+from the homonym library, to estimate a classification tree
+with a maximum number of layers that has been arbitrarily chosen to 2. This will
+be useful later in comparing performances. Given the simple structure of the classification tree it seems already having a quite good performance. 
+
+```{r}
+tree2 <- rpart(critical_temp ~ .,
+  data = train_rs, method = "class",
+  control = rpart.control(maxdepth = 2)
+)
+pred_class2 <- predict(tree2, X_tst, type = "class")
+pre2 <- ifelse(pred_class2 == 1, 1, -1)
+pref2 <- as.factor(pre2)
+
+conf2 <- confusionMatrix(pref2, y_test_fac, positive = "1")
+MER_2 <- 1 - as.numeric(conf2$overall[1])
+conf2
+```
+
+
+## Adaptive Boosting 
+
+**Adaptive Boosting Classification Trees**
+
+In this section, I've manually implemented the *AdaBoost.M1* algorithm
+proposed by *Freud and Schapire in 1997*, I've used it to perform
+binary classification on the Superconductor Dataset. I've based this implementation
+on the description of the algorithm in the book *The Elements of Statistical Learning (page 339) by T.Hastie, R.Tibshirani, J.Friedman*.
+
+### AdaBoost M1 
+
+**Explanation**
+
+The purpose of *Boosting* is to weigh the output of many *weak classifiers* to 
+produce a powerful "committe-based" prediction. I perform *AdaBoost* on the balanced classes dataset. The core idea of the method
+is to combine a weighted bootstrap aggregation technique with
+a clever updating mechanism of the weights ($w_1,w_2,\dots,w_N$) that are used to perform weighted bootstrap sampling. More precisely the algorithm starts
+by sampling the training (N rows) with replacement with equal probabilities ($w_i=1/N$ for all $i = 1,2,\dots,N$).
+
+Then a weak classifier ,$G_m(x)$, is trained on the just sampled training; in the case of trees, a weak classifier is a very short tree with only one (single stump) or just few nodes. Successively, for the ongoing iteration, it is computed the weighted mean of the number of errors on the training (using the ongoing weights);
+
+\[
+  err_m=\frac{\sum_{i=1}^Nw_i\cdot I(y_i\neq G_m(x_i))}{\sum_{i=1}^Nw_i}
+\]
+
+then a quantity alpha is calculated, namely, $\alpha_m = log((1-err_m)/err_m)$
+
+and eventually each component of the weight vector is updated based on how much
+the overall classifier has performed and if the corresponding observation has been
+correctly identified. The update is computed in the following way:
+
+\[
+  w_i \leftarrow w_i\cdot exp\{\alpha_m\cdot I(y_i\neq G_m(x_i))\}\qquad   i=1,2,\dots,N
+\]
+
+More weight is increasingly assigned to observations that are difficult
+to classify. Following this procedure iteratively many times, usually M (number
+of boosting iterations) the algorithm is able to train many weak classifiers 
+on  different versions of the original data. These different versions
+are determined by sampling rows with replacement at each iteration with
+weights updated each time. The final prediction is done by doing a weighted average
+of M weak classifiers using the vector of coefficients alpha. More precisely:
+
+\[
+  G(x) = sign \left[ \sum_{m=1}^M\alpha_m\cdot G_m(x) \right]
+\]
+
+The final class prediction will be determined $\forall \ x$ by $G(x)$
+
+```{r}
+N <- nrow(train_rs)
+```
+
+Initialization of the equal weights
+
+```{r}
+w <- rep(1 / N, N)
+```
+
+Number of boosting iterations
+
+```{r}
+M <- 5000
+```
+
+vector alpha and an empty list of classifiers to fill.
+
+```{r}
+alpha_m <- numeric(M)
+TREE <- vector("list", M)
+```
+
+The core algorithm to update weights $w_i$  for $i=1,2,\dots N$, train weak classifiers $G_1(x),\dots,G_M(x)$
+and estimate the vector of parameters alpha $[\alpha_1\dots\alpha_M]$ is shown below. I've used *Rpart* since it allows me to control the 
+growth of the tree. I've chosen to let the tree grow up to 3
+layers. The sampling of the Bootstrap training using weights $\mathbf{w}$
+is completely included in the argument weights = w of the function Rpart.
+
+```{r}
+for (m in 1:M) {
+  TREE[[m]] <- rpart(critical_temp ~ .,
+    data = train_rs, method = "class",
+    control = rpart.control(maxdepth = 3), weights = w
+  )
+
+  pred_class <- predict(TREE[[m]], X_train_rs, type = "class")
+
+  pre <- ifelse(pred_class == 1, 1, -1)
+
+  err_m <- sum(w * (pre != y_train_rs))
+
+  alpha_m[m] <- log((1 - err_m) / (err_m))
+
+  w <- w * exp(alpha_m[m] * (pre != y_train_rs))
+
+  w <- w / sum(w)
+}
+
+alpha_M <- matrix(alpha_m, ncol = 1)
+```
+
+I repeat the phase of normalization of the matrix of test data
+
+```{r}
+pt <- ncol(X_test)
+nt <- nrow(X_test)
+X_tst <- matrix(data = NA, ncol = pt, nrow = nt)
+
+for (j in 1:pt) {
+  x_tst <- X_train[, j]
+  X_tst[, j] <- (X_test[, j] - min(x_tst)) / (max(x_tst) - min(x_tst))
+}
+
+X_tst <- as.data.frame(X_tst)
+colnames(X_tst) <- colnames(X_test)
+
+y_test_fac <- as.factor(ifelse(y_test < 30, -1, 1))
+```
+
+Here I define the final classifier that is a weighted average of weak
+classifiers weighted with a vector of coefficients alpha that takes into account 
+how well the classifiers (within boosting iterations) are able to correctly
+classify observations.
+
+```{r}
+G <- function(X, TREE, M, alpha_M) {
+  pred <- matrix(data = NA, ncol = M, nrow = nrow(X))
+  for (m in 1:M) {
+    pred_cl <- predict(TREE[[m]], X, type = "class")
+    pre <- ifelse(pred_cl == 1, 1, -1)
+    pred[, m] <- pre
+  }
+  out <- sign(pred %*% alpha_M)
+  return(out)
+}
+```
+
+here i compute the predicted classes using Adaptive Boosting
+
+```{r}
+G_boost <- G(X_tst, TREE, M, alpha_M)
+Gb <- as.factor(G_boost)
+```
+
+As we can see with respect to a standard classification tree i have a slight
+improvement in accuracy and sensitivity but it is not that marked.
+
+```{r}
+confusionMatrix(Gb, y_test_fac, positive = "1")
+```
+
+### Test error
+
+**Test error reduction with AdaBoost**
+
+It is worth mentioning that at each iteration observations misclassified by $G_m(x)$ have their weights scaled by a factor of $exp(\alpha_m)$ increasing their relative influence in the definition of the next classifier $G_{m+1}(x)$; following this path one could prove how the test error is reduced. 
+
+Here, I try to show empirically, through a simulation, how increasing the number of boosting iterations (M) reduces the Misclassification error rate computed on the test set. I also compare it with a single pruned tree and with the MER of 
+a dual stumps classification tree. MM is the vector of arbitrarily chosen boosting iterations.
+
+```{r}
+MM <- c(c(1:10), seq(20, 100, 10), seq(150, 200, 25), 250, 300)
+K <- length(MM)
+N <- nrow(train_rs)
+```
+
+A simple function that allows me to compute the MER, then I have the code to compute the MER as a function of the number of Boosting iterations. This chunk consists of a slight modification of the previous one that performed Adaboost.
+
+```{r}
+class_err <- function(actual, predicted) mean(actual != predicted)
+cer_boost <- numeric(K)
+
+for (k in 1:K) {
+  M_iter <- MM[k]
+  w <- rep(1 / N, N)
+  alpha_m <- numeric(M_iter)
+  TREE <- vector("list", M_iter)
+
+  for (m in 1:MM[k]) {
+    TREE[[m]] <- rpart(critical_temp ~ .,
+      data = train_rs, method = "class",
+      control = rpart.control(maxdepth = 2), weights = w
+    )
+
+    pred_class <- predict(TREE[[m]], X_train_rs, type = "class")
+
+    pre <- ifelse(pred_class == 1, 1, -1)
+
+
+    err_m <- sum(w * (pre != y_train_rs))
+
+    alpha_m[m] <- log((1 - err_m) / (err_m))
+
+    w <- w * exp(alpha_m[m] * (pre != y_train_rs))
+    w <- w / sum(w)
+  }
+
+  alpha_M <- matrix(alpha_m, ncol = 1)
+  Gboost <- G(X_tst, TREE, M_iter, alpha_M)
+  Gboost <- as.factor(Gboost)
+  cer_boost[k] <- class_err(y_test_fac, Gboost)
+}
+
+plot(MM, cer_boost,
+  type = "l", col = "blue", pch = 19, lwd = 1, main = "Test Error rate   - Discrete AdaBoost -",
+  xlab = "Boosting Iterations", ylab = "Test Misclassification Error"
+)
+abline(h = MER_single_pruned_tree, col = "black", lty = "dashed")
+text(x = 260, y = MER_single_pruned_tree-0.005, labels = c("8 node CV pruned Tree"), cex = 0.7, col = "black")
+abline(h = MER_2, col = "black", lty = "dashed")
+text(x = 250, y = MER_2-0.005, labels = c("Double-Stumps Weak Learner"), cex = 0.7, col = "grey12")
+points(MM, cer_boost, pch = 1, cex = 1.2, col = "blue")
+text(x = 270, y = cer_boost[which(MM==250)]+0.005, labels = c("AdaBoost"), col = "black", cex = 0.7)
+```
+
+It can be seen how the the test error rate for the *AdaBoost.M1* decreases as the number of boosting iteration increases, maintaining itself below the MER of standard Trees. At the same time the improvement in MER is not that high. 
+
+## Bagging Trees
+
+In this section, I've implemented the technique of *Bagging*, also known as bootstrap aggregation, specifically for classification trees. The idea behind this method is to fit many high-variance (hence data-dependent) low-bias classifiers $\hat{f}(x)$ to $B$ bootstrap samples $\mathbf{Z}^{*b}$ of the training data $\mathbf{Z}$ and then averaging the prediction yielded by each model. More precisely, in the following way:
+
+\[
+  \hat{f}_{bag}(x)=\frac{1}{B}\cdot \underset{b=1}{\overset{B}{\sum}}\hat{f}^{*b}(x)
+\]
+
+More precisely $\hat{f}_{bag}(x)$ is a Monte Carlo estimate of the true bagging estimate that would be $\mathbb{E}_P{\left[\hat{f}^*(x)\right]}$; where $\mathbf{Z}^*=\{(x_1^*,y_1^*),(x_2^*,y_2^*),\dots,(x_N^*,y_N^*)\}$ and P is the empirical distribution putting equal probability 1/N on each data point $(x_i^*,y_i^*)$. One could verify how taking the Monte Carlo estimate (nothing else than an average) reduces the variance of the classifier. 
+
+The way in which the averaging phase is carried out
+will determine different types of bagging (by consensus vote or probability). 
+In simple words, a bagged classifier is just the mean of classifiers 
+trained on a collection of bootstrap sample; Doing so reduces the variance of 
+the prediction and enhances the performance on the test since the bagged
+classifier will be more robust. In this case, I've decided to apply bootstrap aggregation (Bagging)
+to classification trees, and I've used section 8.7
+of *The Elements of Statistical learning*  as primary source of study . Therefore in this application $\hat{f}^{*b}(x)=T^{*b}$
+since the classifier is a classification tree.
+
+
+### Bagging types: 
+
+**Consensus and Probability approach**
+
+In Bagging trees there are two distinct approaches that could be followed to aggregate classifiers;
+
+- The first one is by consensus or vote, in other words, for each observation
+  each classifier will "vote" one of the two target classes. Then,
+  votes are aggregated to produce for each observation in the test set a proportion
+  of trees that have voted one class and the proportion that have voted the other;
+  for each observation $\mathbf{x}_i$
+  \[
+    \hat{f}_{bag}(x) = [p_1(\mathbf{x}_i),p_2(\mathbf{x}_i)]
+  \]
+  where $p_k(\mathbf{x}_i)$ is the proportion of trees predicting class $k$ at $\mathbf{x}_i$. In this
+  case $k = 1$ or $k = 2$. Each observation is then allocated to the most voted class. Namely:
+  \[
+    \hat{G}_{bag}(x) = \underset{k}{\text{argmax}}\left[\hat{f}_{bag}(x)\right]
+  \]
+- The second approach is based on probabilities, namely, each classification tree
+  will produce a posterior probability matrix; then the bagged classifier consists
+  in classifying using the average probability matrix (component-wise average of   probability matrices).
+  
+Firstly I've tried the second approach alone that should produce improved estimates 
+with lower variance; then i compared the test error as a function of
+the dimension of the bootstrap sample across the two strategies, consensus and 
+probability.
+
+```{r}
+class_err <- function(actual, predicted) mean(actual != predicted)
+pred <- vector("list")
+```
+
+Number of bagging iterations
+
+```{r}
+B <- 200
+```
+
+Here i define the function that will allow to aggregate Bootstrap classifiers
+(specifically posterior probability matrices) in a single bagged classifier (one single matrix) 
+
+```{r}
+mean_list <- function(x) Reduce(`+`, x) / B
+
+n_trn <- nrow(train_rs)
+n_tst <- nrow(X_tst)
+
+for (b in 1:B) {
+  Z <- train_rs[sample(nrow(train_rs), nrow(train_rs), replace = TRUE), ]
+
+  Tree <- tree(critical_temp ~ ., data = Z, split = "deviance")
+
+  pred[[b]] <- matrix(predict(Tree, X_tst, type = "vector"), ncol = 2, nrow = n_tst)
+}
+
+final_mat_pred <- mean_list(pred)
+pred_BAG <- as.factor(ifelse(apply(final_mat_pred, 1, which.max) == 1, -1, 1))
+
+y_test_fac <- as.factor(ifelse(y_test < 30, -1, 1))
+
+
+confusionMatrix(pred_BAG, y_test_fac, positive = "1")
+```
+
+
+### Test error comparison
+
+**MER comparison: Consensus and Probability Bagging**
+
+In this case i'm interested in a full grown high-variance tree
+that i want to make more robust using bagging, for this reason
+i use the argument rpart.control with complexity parameter
+cp=0, and minsplit=2 and maxdepth=30. Then I've modified the code above to include the consensus vote strategy and compute test error for both approaches. But first I need to initialize the quantities of this chunk.
+
+```{r}
+BB <- c(c(1:10), seq(15, 50, 5), seq(60, 100, 10), seq(125, 250, 25))
+H <- length(BB)
+
+mer_prob <- numeric(H)
+mer_cons <- numeric(H)
+
+
+y_test_fac <- as.factor(ifelse(y_test < 30, -1, 1))
+mean_list <- function(x, B) Reduce(`+`, x) / B
+
+class_err <- function(actual, predicted) mean(actual != predicted)
+
+n_trn <- nrow(train_rs)
+n_tst <- nrow(X_tst)
+```
+
+
+```{r}
+for (h in 1:H) {
+  indicator <- matrix(data = 0, nrow = n_tst, ncol = 2)
+  pred <- vector("list", BB[h])
+  for (b in 1:BB[h]) {
+    Z <- train_rs[sample(nrow(train_rs), nrow(train_rs), replace = TRUE), ]
+
+    Tree <- rpart(critical_temp ~ .,
+      data = Z, method = "class",
+      control = rpart.control(cp = 0, minsplit = 2, maxdepth = 30)
+    )
+
+    pred[[b]] <- matrix(predict(Tree, X_tst, type = "prob"), ncol = 2, nrow = n_tst)
+    predi <- predict(Tree, X_tst, type = "class")
+    predi01 <- ifelse(predi == -1, 1, 2)
+
+    for (i in 1:n_tst) {
+      k <- indicator[i, predi01[i]]
+      indicator[i, predi01[i]] <- k + 1
+    }
+  }
+
+  final_mat_pred <- mean_list(pred, BB[h])
+  pred_BAG <- as.factor(ifelse(apply(final_mat_pred, 1, which.max) == 1, -1, 1))
+  mer_prob[h] <- class_err(y_test_fac, pred_BAG)
+
+  mat <- t(apply(indicator, 1, function(x) x / sum(x)))
+
+  pred_cons <- as.factor(unlist(apply(mat, 1, which.max)))
+  levels(pred_cons) <- c(-1, 1)
+  mer_cons[h] <- class_err(y_test_fac, pred_cons)
+}
+
+plot(BB, mer_prob,
+  type = "l", col = "green3",
+  xlab = "Number of Bootstrap Samples",
+  ylab = "Test Misclassification Error",
+  main = "Test Error Rate  -Bagging Trees-", lwd = 1
+)
+points(BB, mer_prob, col = "green3", lwd = 1, cex = 1.2)
+legend(
+  x = 200, y = 0.082, legend = c("probability", "consensus"), cex = 0.9,
+  bty = "n", pch = c(19, 19), col = c("green3", "darkorange2")
+)
+
+points(BB, mer_cons, col = "darkorange2", type = "l", lwd = 1)
+points(BB, mer_cons, col = "darkorange2", lwd = 1, cex = 1.2)
+```
+
+In this case I could have shown also the MER of the single tree, to show
+how bagging reduces the Misclassification error rate on the test, but 
+since it was quite higher, I would have lost a clear view of the difference between
+the test error for the consensus and probability approach. 
+
+### Bagging reduces variance 
+
+**probability approach**
+
+It is also interesting to compare the variance of this 
+Bagging procedure, with standard classification trees
+on different bootstrap samples, this time for a fixed number B=150 
+iterations. In the following graph for W distinct times
+I show the test error estimate for Bagged classifier and for classification tree 
+In other words for W=50 times I estimate the MER on the test for 
+the Bagged classifier (defined by averaging 150 prob. matrix on Bootstrap samples)
+and the MER on the test for a single tree on the first Bootstrap sample. In other words, I wanted to show the behavior of Bagging compared to a standard tree in front of different datasets.  
+
+```{r}
+W <- 50
+B <- 150
+y_test_fac <- as.factor(ifelse(y_test < 30, -1, 1))
+class_err <- function(actual, predicted) mean(actual != predicted)
+pred <- vector("list")
+mer_bag <- numeric(W)
+mer_stand <- numeric(W)
+X_tst <- as.data.frame(X_tst)
+colnames(X_tst) <- colnames(X_test)
+
+for (w in 1:W) {
+  for (b in 1:B) {
+    Z <- train_rs[sample(nrow(train_rs), nrow(train_rs), replace = TRUE), ]
+
+    Tree <- tree(critical_temp ~ ., data = Z, split = "deviance")
+
+    pred[[b]] <- matrix(predict(Tree, X_tst, type = "vector"), ncol = 2, nrow = n_tst)
+  }
+
+  final_mat_pred <- mean_list(pred, B)
+  pred_BAG <- as.factor(ifelse(apply(final_mat_pred, 1, which.max) == 1, -1, 1))
+  mer_bag[w] <- class_err(y_test_fac, pred_BAG)
+  pred_stand <- as.factor(ifelse(apply(pred[[1]], 1, which.max) == 1, -1, 1))
+  mer_stand[w] <- class_err(y_test_fac, pred_stand)
+}
+
+plot(1:W, mer_stand,
+  type = "l", col = "red3",
+  ylim = c(min(mer_bag), max(mer_stand)),
+  xlab = "index of Bootstrap iteration",
+  main = "Misclassification Error Rate",
+  ylab = "MER"
+)
+points(1:W, mer_bag, col = "green3", type = "l")
+```
+
+It is clear how changing the underlying data creates high variability in the test error rate with a single classification tree, while doing Bagging reduces not only the test error but also its variance. 
+
+To conclude I've discovered that the superconductivity dataset is composed by
+rather clear and informative data. After removing highly correlated variables
+I found out that the absence of a high amount of noise in the data has left few
+space for improvement in classification metrics (such as accuracy,sensitivity) when
+shifting from standard techniques to more advanced ones.
+This analysis has been useful to empirically understand how more advanced models (Bagging and Boosting Trees) in the presence of non-sparse/low-noise data could be discarded in favor of simpler but more interpretable models. In this case, it isn't only the interpretability of standard models that should convince to apply them (rather than more advanced ones), but also the low improvement in classification metrics (across different approaches).
+
+
+I had also tried to fit a logistic regression model on the training data
+to perform classification; Later I chose not to include it in the report
+since in the phase of diagnostic the structural linearity of the predictor
+was not validated. Since i didn't want to estimate a logistic regression (maybe
+also penalized) with a non linear predictor, i opted for a non-parametric approach using k-nearest neighborhood (KNN).
+I've implemented it using the function k-nn of the library class and 
+I've done manually the cross-validation phase to choose the optimal size of the neighborhood.
+
+
+## KNN 
+
+**k-nearest neighborhood, k manually cross validated**
+
+
+```{r,echo=FALSE}
+set.seed(1)
+data <- data_or
+n <- nrow(data)
+prop <- 80 / 100
+ind_train <- sample(1:n, size = floor(prop * n), replace = FALSE)
+ind_test <- c(1:n)[-ind_train]
+```
+
+```{r,echo=FALSE}
+X_train <- data[ind_train, ] %>% select(-critical_temp)
+y_train <- data[ind_train, ] %>% select(critical_temp)
+```
+
+```{r,echo=FALSE}
+X_test <- data[ind_test, ] %>% select(-critical_temp)
+y_test <- data[ind_test, ] %>% select(critical_temp)
+
+n <- dim(X_train)[1]
+p <- dim(X_train)[2]
+
+X_trn <- matrix(data = NA, ncol = p, nrow = n)
+
+for (j in 1:p) {
+  x_trj <- X_train[, j]
+  X_trn[, j] <- (x_trj - min(x_trj)) / (max(x_trj) - min(x_trj))
+}
+
+
+X_trn <- as.data.frame(X_trn)
+colnames(X_trn) <- colnames(X_train)
+
+y_train_fac <- as.factor(ifelse(y_train < 30, -1, 1))
+```
+
+
+```{r,echo=FALSE}
+train <- data.frame(X_trn, critical_temp = y_train_fac)
+```
+
+
+```{r,echo=FALSE}
+tab <- as.numeric(table(train$critical_temp))
+```
+
+
+```{r,echo=FALSE}
+diff <- max(tab) - min(tab)
+
+train_HTS <- train %>%
+  group_by(critical_temp) %>%
+  filter(critical_temp == 1) %>%
+  sample_n(size = diff, replace = T)
+
+train_rs <- as.data.frame(rbind(train, train_HTS))
+train_rs <- train_rs[sample(nrow(train_rs)), ]
+
+colnames(train_rs) <- colnames(train)
+y_train_rs <- train_rs %>% select(critical_temp)
+X_train_rs <- train_rs %>% select(-critical_temp)
+
+y_train_rs_fact <- as.factor(ifelse(as.numeric(unlist(y_train_rs)) == 1, -1, 1))
+
+nrow_X_train_rs <- nrow(X_train_rs)
+
+
+```
+
+### Cross validation
+
+I want to choose the optimal neighborhood size by manually cross-validating it.
+It is worth mentioning that Shuffling the rows of the Oversampled training
+and then choosing the first *fold_dim* rows, then the second ... up to V part etc  is equal to divide randomly the original dataset in V parts and then perform cross validation. I've arbitrarily chosen the size of the neighborhood to test.
+
+```{r}
+kk <- c(c(1:12), seq(14, 100, 4))
+V <- 10
+fold_dim <- nrow_X_train_rs / V
+
+sh_index <- sample(nrow_X_train_rs)
+X_train_sh <- X_train_rs[sh_index, ]
+y_train_sh <- y_train_rs_fact[sh_index]
+
+pt <- ncol(X_test)
+nt <- nrow(X_test)
+X_tst <- matrix(data = NA, ncol = pt, nrow = nt)
+
+for (j in 1:pt) {
+  x_tst <- X_train[, j]
+  X_tst[, j] <- (X_test[, j] - min(x_tst)) / (max(x_tst) - min(x_tst))
+}
+
+y_test_fac <- as.factor(ifelse(y_test < 30, -1, 1))
+MER <- matrix(data = NA, nrow = V, ncol = length(kk))
+calc_class_err <- function(actual, predicted) {
+  mean(actual != predicted)
+}
+
+```
+
+Actual Cross validation phase:
+
+```{r}
+for (v in 1:V) {
+  ind_vld_v <- seq(((v - 1) * fold_dim) + 1, fold_dim * (v), 1)
+  X_vld_v <- X_train_sh[ind_vld_v, ]
+  X_small_train_v <- X_train_sh[-ind_vld_v, ]
+  y_vld_v <- y_train_sh[ind_vld_v]
+  y_small_train_v <- y_train_sh[-ind_vld_v]
+  for (i in 1:length(kk)) {
+    pred <- knn(
+      train = X_small_train_v,
+      test = X_vld_v, cl = y_small_train_v,
+      k = kk[i]
+    )
+    MER[v, i] <- calc_class_err(y_vld_v, pred)
+  }
+}
+
+MER_means <- colMeans(MER)
+
+```
+
+
+Below, I've plotted colored lines representing the Misclassification error rate
+as a function of the k size of the neighbor across the 
+V folds while in black is depicted the average MER (over different folds).
+the optimal K is found as the one minimizing the average MER. 
+In this case it turns out to be 1. 
+
+```{r}
+plot(kk, MER[1, ],
+  type = "l", col = sample(c("red", "green", "blue", "dodgerblue", "darkorange", "purple")),
+  ylim = c(0.04, 0.10), lwd = 0.7, ylab = "MER", xlab = "k- size of the neighbourhood", main = "MER behavior across 10-fold CV"
+)
+for (v in 1:V) {
+  points(kk, MER[v, ], lwd = 0.7, type = "l", col = sample(c("red", "green", "blue", "dodgerblue", "darkorange", "purple")))
+}
+points(kk, MER_means, type = "l", col = "black", lwd = 2)
+abline(h = min(MER_means), col = "grey", lwd = 1.3, lty = "dashed")
+abline(v = which.min(MER_means), col = "grey", lwd = 1.3, lty = "dashed")
+points(which.min(MER_means), min(MER_means), col = "black", pch = 19, cex = 0.6)
+legend(x = 70, y = 0.08, legend = c("Average MER"), bty = "n", cex = 0.8, fill = "black")
+
+index <- which.min(MER_means)
+kCV <- kk[index]
+
+pred_kCV <- knn(
+  train = X_train_rs,
+  test = X_tst, cl = y_train_rs_fact,
+  k = kCV
+)
+
+confusionMatrix(pred_kCV, y_test_fac, positive = "1")
+```
+
+It can be observed that despite its simplicity KNN performs quite well compared with Boosting and Bagging.
+I would say that for its simple structure it is the one I would choose to communicate the method used to perform the analysis. There exists an adaptive version of this algorithm that works well with sparse data, but this was not the case. Regarding the choice of the size of the neighbor, using k=1 turns out to be the optimal choice, since there isn't too much noise that has to be counteracted using an higher k.
+
+# Conclusions
+
+Outcomes of this analysis:
+
+- Using an unsupervised approach (similar to Clustering in a Text Mining context), I've discovered 4 clusters of      Superconductors to which I assigned labels; I've also checked the coherency of the estimated classes
+  using the critical temperature variable (not used in the clustering estimation phase). In the interpretation phase 
+  elaborating information about the proportion of chemical elements has been crucial. 
+
+- Then the theory of two Classification Methods, namely, Adaptive Boosting and Bagging has been presented; Through
+  simulation it has been checked the property of variance reduction and test error rate improvement, with a focus
+  on the two ways of performing bagging.
+
+- I've discovered how advanced methods combined with an already clean dataset don't necessarily 
+  bring huge improvements in classification metrics (compared to standard methods)
+
+- In the end, a CV k-NN turns out to be very accurate for this problem. K=1 has been chosen based on cross-validation
+
+
+
